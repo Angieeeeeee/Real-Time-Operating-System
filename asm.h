@@ -26,6 +26,9 @@ uint32_t *getMsp(void);
 uint32_t  getControl(void);
 uint32_t  getIpsr(void);
 void setPsp(uint32_t *psp);
-void setAsp(void);
+void setAspOn(void);
+void setAspOff(void);
+void setPrivOff(void);
+void setPrivOn(void);
 
 #endif

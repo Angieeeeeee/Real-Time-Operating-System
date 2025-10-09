@@ -25,10 +25,12 @@
 // Subroutines
 //-----------------------------------------------------------------------------
 
-void busFaultISR(void);
-void usageFaultISR(void);
-void hardFaultISR(void);
-void mpuFaultISR(void);
-void pendsvISR(void);
+char* uitoa(uint32_t num);
+char* inttohex(uint32_t num);
+void busFaultISR();
+void usageFaultISR();
+void hardFaultISR();
+void mpuFaultISR();
+void pendsvISR();
 
 #endif

@@ -1,9 +1,9 @@
 // Angelina Abuhilal
 // RTOS: mini project
 
-//-----------------------------------------------------------------------------
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 // Hardware Target
-//-----------------------------------------------------------------------------
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 
 // Target Platform: EK-TM4C123GXL Evaluation Board
 // Target uC:       TM4C123GH6PM
@@ -17,9 +17,9 @@
 // Fault triggers:
 //   PBs
 
-//-----------------------------------------------------------------------------
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 // Device includes, defines, and assembler directives
-//-----------------------------------------------------------------------------
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -28,6 +28,11 @@
 #include "clock.h"
 #include "uart0.h"
 #include "tm4c123gh6pm.h"
+#include "asm.h"
+#include "isr.h"
+#include "gpio.h"
+#include "mem.h"
+#include "mpu.h"
 
 // Info that can be accepted
 #define MAX_CHARS 80
@@ -43,13 +48,21 @@ typedef struct _USER_DATA
     char fieldType[MAX_FIELDS];
 } USER_DATA;
 
-// Bitband aliases
-  #define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 1*4)))
-  #define GREEN_LED    (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 3*4)))
+// LED bitbands
+    #define BLUE_LED   PORTF,2 // on-board blue LED
+    #define RED_LED    PORTE,0 // off-board red LED
+    #define ORANGE_LED PORTA,2 // off-board orange LED
+    #define YELLOW_LED PORTA,3 // off-board yellow LED
+    #define GREEN_LED  PORTA,4 // off-board green LED
 
-// PortF masks
-  #define GREEN_LED_MASK 8
-  #define RED_LED_MASK 2
+// PB bitbands
+    #define BUS_PB     PORTF,3 // PB0
+    #define USG_PB     PORTC,4 // PB1
+    #define HRD_PB     PORTC,5 // PB2
+    #define MPU_PB     PORTC,6 // PB3
+    #define PSV_PB     PORTC,7 // PB4
+
+uint32_t pid = 12;
 
 //-----------------------------------------------------------------------------
 // Subroutines
@@ -62,16 +75,18 @@ void initHw()
     initSystemClockTo40Mhz();
 
     // Enable clocks
-    SYSCTL_RCGCGPIO_R = SYSCTL_RCGCGPIO_R5;
+    enablePort(PORTF);
     _delay_cycles(3);
+//
+//    // Configure LED pins
+        selectPinPushPullOutput(BLUE_LED);
 
-    // Configure LED pins
-    GPIO_PORTF_DIR_R |= GREEN_LED_MASK | RED_LED_MASK;  // bits 1 and 3 are outputs
-    GPIO_PORTF_DR2R_R |= GREEN_LED_MASK | RED_LED_MASK; // set drive strength to 2mA (not needed since default configuration -- for clarity)
-    GPIO_PORTF_DEN_R |= GREEN_LED_MASK | RED_LED_MASK;  // enable LEDs
+    // Enable Ports
+    enablePort(PORTA); enablePort(PORTC); enablePort(PORTE);
 
-    // Enable fault interrupts for mpu, bus, usage, and hard faults
-    NVIC_SYS_HND_CTRL_R |= NVIC_SYS_HND_CTRL_USAGE | NVIC_SYS_HND_CTRL_BUS | NVIC_SYS_HND_CTRL_MEM | NVIC_SYS_HND_CTRL_SVC;
+    // Enable fault interrupts
+    NVIC_SYS_HND_CTRL_R |= NVIC_SYS_HND_CTRL_USAGE | NVIC_SYS_HND_CTRL_BUS | NVIC_SYS_HND_CTRL_MEM;
+
 }
 
 void yield(void)
@@ -79,6 +94,9 @@ void yield(void)
     // empty for now (?)
 }
 
+//------------------------------------------------------------------------------------------------------------------------------------------------------
+// Command Processing Functions
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 // Function that stores the inputed characters
 void getsUart0(USER_DATA *data)
 {
@@ -187,17 +205,21 @@ int32_t getFieldInteger(USER_DATA* data, uint8_t fieldNumber)
         }
 }
 
-int myStrcmp(const char *a, const char *b)
+// check if strings are equal (not case sensitive)
+bool sameStr(const char *str1, const char *str2)
 {
-    const unsigned char *s1 = (const unsigned char*)a;
-    const unsigned char *s2 = (const unsigned char*)b;
-
-    while (*s1 && (*s1 == *s2))
+    while (*str1 && *str2)
     {
-        s1++;
-        s2++;
+        char str1Lower, str2Lower;
+        if (*str1 > 64 && *str1 < 91) str1Lower = *str1 + 32;  // if upper case turn lower
+        else str1Lower = *str1;
+        if (*str2 > 64 && *str2 < 91) str2Lower = *str2 + 32;  // if upper case turn lower
+        else str2Lower = *str2;
+        if (str1Lower != str2Lower) return false;
+        str1++;
+        str2++;
     }
-    return (int)(*s1) - (int)(*s2);  // <0 if a<b, 0 if equal, >0 if a>b
+    return (*str1 == *str2); // loop ended cause one reached null, if both ended at null and didn't fail in the loop then they are equal
 }
 
 // function which returns true if the command matches the first field and the number of arguments (excluding the command field) is greater than or equal to the requested number of minimum arguments.
@@ -206,23 +228,12 @@ bool isCommand(USER_DATA* data, const char strCommand[], uint8_t minArguments)
     // check if command matches the first field
     char* firstField = getFieldString(data, 0);
 
-    // to make not case sensitive
-    int i;
-    for (i = 0; i < longestCommand; i++)
-    {
-        // make lower case if upper case
-        if (data->buffer[i] > 64 && data->buffer[i] < 91)
-        {
-            data->buffer[i] += 32;
-        }
-    }
-
-    if (myStrcmp(strCommand, firstField) != 0)
+    if (!sameStr(strCommand, firstField))
     {
         return false;
     }
 
-    // check if number of arguments (-command) is >= requested min arguments
+    // check if number of arguments (minus command) is >= requested min arguments
     if ((data->fieldCount - 1) < minArguments)
     {
         return false;
@@ -231,6 +242,10 @@ bool isCommand(USER_DATA* data, const char strCommand[], uint8_t minArguments)
     return true; // if it hasn't returned false then it has a matching command and enough args
 
 }
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------
+// OS Functions
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 
 void ps(void)
 {
@@ -242,13 +257,16 @@ void ipcs(void)
     putsUart0("ipcs called");
 }
 
-void kill(uint32_t pid)
+void kill(uint32_t pidK)
 {
-    putsUart0("pid killed");
+    putsUart0("pid ");
+    putsUart0(uitoa(pidK));
+    putsUart0(" killed");
 }
-void pkill(char* pid)
+void pkill(char* processName)
 {
-    putsUart0("pid killed");
+    putsUart0(processName);
+    putsUart0(" killed");
 }
 void pi(bool on)
 {
@@ -272,26 +290,171 @@ void preempt(bool on)
         putsUart0("preempt off");
     }
 }
-void sched(bool prio_on)
+void sched(bool prioOn)  // true = priority scheduling, false = round robin scheduling
 {
-    if (prio_on)
+    if (prioOn)
     {
         putsUart0("sched prio");
     }
-    if (!prio_on)
+    if (!prioOn)
     {
         putsUart0("sched rr");
     }
 }
-void pidof(const char name[])
+void pidof(char *name)
 {
-    putsUart0("proc_name launched");
+    putsUart0(name);
+    putsUart0(" launched");
 }
 void run(char *name)
 {
-    // turn red led on
-    RED_LED = 1;
+    if (sameStr(name, "blue"))
+        setPinValue(BLUE_LED, 1); // test function turning red led on
 }
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------
+// Fault Trigger Functions (bus, usage, hard, mpu, pendsv)
+//------------------------------------------------------------------------------------------------------------------------------------------------------
+
+void busFaltTrig() // works
+{
+    // try accessing an invalid peripheral address
+    uint32_t* p = malloc_heap(4000);      //fill r1
+    if (!p) putsUart0("malloc failed\n");
+
+    uint32_t* s = malloc_heap(8000);      //fill r2
+    if (!s) putsUart0("malloc failed\n");
+
+    uint32_t* q = malloc_heap(8000);      // fill r3
+    if (!q) putsUart0("malloc failed\n");
+
+    uint32_t* k = malloc_heap(7000);      // r4
+    if (!k) putsUart0("malloc failed\n");
+
+    uint32_t* a = malloc_heap(1000);      // r4
+    if (!1) putsUart0("malloc failed\n");
+
+    free_heap(p);
+    free_heap(s);
+    free_heap(q);
+    free_heap(k);
+
+    uint32_t* ptr = (uint32_t *) 0xFFFFFFFC;
+    uint32_t val = *ptr;
+}
+
+void usageFaltTrig()
+{
+    NVIC_CFG_CTRL_R |= NVIC_CFG_CTRL_DIV0;      // disable the divide by 0 trap
+    volatile int zero = 0;               // volatile so the compiler can’t fold it
+    volatile int val = 23 / zero;        // UsageFault now
+    (void)val;
+}
+
+void hardFaltTrig()
+{
+    NVIC_SYS_HND_CTRL_R &= ~NVIC_SYS_HND_CTRL_USAGE;    // disable usage fault handler
+    usageFaltTrig();
+}
+
+void mpuFaltTrig()
+{
+    setPrivOff();
+    // read from heap without malloc
+    uint32_t* p = (uint32_t *)0x20005000;
+}
+
+void pendsvTrig()
+{
+    NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------
+// Fault Trigger Functions (bus, usage, hard, mpu, pendsv)
+//------------------------------------------------------------------------------------------------------------------------------------------------------
+
+//unpriv r/w pass
+void test1()
+{
+    // in priv, malloc stuff
+    // witch to unpriv, test to see if you can write to those areas in memory
+
+    uint32_t* p = malloc_heap(4000);      //fill r1
+    if (!p) putsUart0("malloc failed\n");
+
+    uint32_t* s = malloc_heap(8000);      //fill r2
+    if (!s) putsUart0("malloc failed\n");
+
+    uint32_t* q = malloc_heap(8000);      // fill r3
+    if (!q) putsUart0("malloc failed\n");
+
+    uint32_t* k = malloc_heap(7000);      // r4
+    if (!k) putsUart0("malloc failed\n");
+
+    uint32_t* a = malloc_heap(1000);      // very last block
+    if (!a) putsUart0("malloc failed\n");
+
+    free_heap(p);
+    free_heap(s);
+    free_heap(q);
+    free_heap(k);
+
+    dumpHeap(); // prints the block table
+
+    // Dereference the pointer and write to the address (*p = value)
+    // While in privileged mode, verify you can still access ram in the allocated range of SRAM.
+    setPrivOff();
+
+    *a = 0xB00B;
+    uint32_t val = *a;
+    putsUart0("Success!!");
+}
+
+//unpriv r/w fail
+void test2()
+{
+    // in priv, malloc stuff
+    // free them
+    // switch to unpriv and try to write to them (should fail)
+
+    //In unprivileged mode, dereference the pointer and write to the address (*p = value) and verify there is now a fault.
+
+    uint32_t* p = malloc_heap(4000);      //fill r1
+    if (!p) putsUart0("malloc failed\n");
+
+    uint32_t* s = malloc_heap(8000);      //fill r2
+    if (!s) putsUart0("malloc failed\n");
+
+    uint32_t* q = malloc_heap(8000);      // fill r3
+    if (!q) putsUart0("malloc failed\n");
+
+    uint32_t* k = malloc_heap(7000);      // r4
+    if (!k) putsUart0("malloc failed\n");
+
+    uint32_t* a = malloc_heap(1000);      // very last block
+    if (!a) putsUart0("malloc failed\n");
+
+    putsUart0("malloced heap: \n");
+    dumpHeap(); // prints the block table
+
+    free_heap(p);
+    free_heap(s);
+    free_heap(q);
+    free_heap(k);
+//    free_heap(a);
+
+    putsUart0("freed heap: \n");
+    dumpHeap(); // prints the block table
+
+    setPrivOff();
+
+    *k = 0xB00B;
+    uint32_t val = *k;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------
+// Shell Function (mother? mom? mamacita)
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 
 void shell(void)
 {
@@ -299,10 +462,12 @@ void shell(void)
     while(true)
     {
         putsUart0("> ");
-        //get string from user
+        //get string from userCall allowFlashAccess(),
         getsUart0(&data);
         //parse fields
         parseFields(&data);
+        //malloc testing
+        uint32_t* p;
 
         if(isCommand(&data,"reboot",0))
         {
@@ -318,29 +483,26 @@ void shell(void)
         }
         else if(isCommand(&data,"kill",1))
         {
-            int32_t pid = getFieldInteger(&data, 1);
-            kill(pid);
+            int32_t pidK = getFieldInteger(&data, 1);
+            kill(pidK);
         }
         else if(isCommand(&data,"pkill",1))
         {
-            char* nextField = getFieldString(&data, 1);
-            pkill(nextField);
+            char* processName = getFieldString(&data, 1);
+            pkill(processName);
         }
         else if (isCommand(&data, "pi", 1))
         {
             // Turns priority inheritance on or off
             char* OnOff = getFieldString(&data, 1);
-            bool on;
 
-            if (myStrcmp(OnOff, "on") == 0)
+            if (sameStr(OnOff, "on"))
             {
-                on = true;
-                pi(on);
+                pi(true);
             }
-            else if (myStrcmp(OnOff, "off") == 0)
+            else if (sameStr(OnOff, "off"))
             {
-                on = false;
-                pi(on);
+                pi(false);
             }
             else
             {
@@ -351,17 +513,14 @@ void shell(void)
         {
             // Turns preemption on or off
             char* OnOff = getFieldString(&data, 1);
-            bool on;
 
-            if (myStrcmp(OnOff, "on") == 0)
+            if (sameStr(OnOff, "on"))
             {
-                on = true;
-                preempt(on);
+                preempt(true);
             }
-            else if (myStrcmp(OnOff, "off") == 0)
+            else if (sameStr(OnOff, "off"))
             {
-                on = false;
-                preempt(on);
+                preempt(false);
             }
             else
             {
@@ -372,17 +531,17 @@ void shell(void)
         {
             // either priority or round robin scheduling
             char* prioRR = getFieldString(&data, 1);
-            bool prio_on;
+            bool prioOn;
 
-            if (myStrcmp(prioRR, "prio") == 0)
+            if (sameStr(prioRR, "prio"))
             {
-                prio_on = true;
-                sched(prio_on);
+                prioOn = true;
+                sched(prioOn);
             }
-            else if (myStrcmp(prioRR, "rr") == 0)
+            else if (sameStr(prioRR, "rr"))
             {
-                prio_on = false;
-                sched(prio_on);
+                prioOn = false;
+                sched(prioOn);
             }
             else
                 putsUart0("invalid prio|rr field");
@@ -397,6 +556,47 @@ void shell(void)
             char* name = getFieldString(&data, 1);
             run(name);
         }
+        else if (isCommand(&data, "trig", 1)) // trigger fault ISRs
+        {
+            char* fault = getFieldString(&data, 1);
+            if      (sameStr(fault, "bus"))    busFaltTrig();
+            else if (sameStr(fault, "usage"))  usageFaltTrig();
+            else if (sameStr(fault, "hard"))   hardFaltTrig();
+            else if (sameStr(fault, "mpu"))    mpuFaltTrig();
+            else if (sameStr(fault, "pendsv")) pendsvTrig();
+            else
+                putsUart0("Invalid. Trigger options: bus, usage, hard, mpu, pendsv");
+        }
+        else if (isCommand(&data, "malloc", 1)) // malloc size
+        {
+            uint32_t size = atoi(getFieldString(&data, 1));
+            p = malloc_heap(size);
+            if (!p) putsUart0("invalid\n");
+            else putsUart0("success!\n");
+        }
+        else if (isCommand(&data, "dumpHeap", 0))
+        {
+            dumpHeap();
+        }
+        else if (isCommand(&data, "free", 0))
+        {
+            free_heap(p);
+        }
+        else if (isCommand(&data, "test1", 0))
+        {
+            test1();
+        }
+        else if (isCommand(&data, "test2", 0))
+        {
+            test2();
+        }
+        else if (isCommand(&data, "debugR", 1))
+        {
+            uint32_t region = atoi(getFieldString(&data, 1));
+            NVIC_MPU_NUMBER_R = region;
+            volatile uint32_t regionReg = NVIC_MPU_ATTR_R;
+            putsUart0(inttohex(regionReg));
+        }
         else
         {
             putsUart0("invalid command");
@@ -405,15 +605,28 @@ void shell(void)
     }
 }
 
-//-----------------------------------------------------------------------------
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 // Main
-//-----------------------------------------------------------------------------
+//------------------------------------------------------------------------------------------------------------------------------------------------------
 
 int main(void)
 {
     initHw();
     initUart0();
     setUart0BaudRate(115200, 40e6);
+
+    // process starting at top of heap, decrements
+    setPrivOn();
+
+    setBackgroundRule();    // RW for all, X for none
+    allowFlashAccess();     // only R for all
+    allowPeripheralAccess();// take away RW of priv peripheral from unpriv
+    setupSramAccess();      // take away RW from unpriv
+
+    NVIC_MPU_CTRL_R |= NVIC_MPU_CTRL_ENABLE | NVIC_MPU_CTRL_PRIVDEFEN;
+
+    setPsp((uint32_t *) 0x20008000);
+    setAspOn();
 
     shell();
 }
